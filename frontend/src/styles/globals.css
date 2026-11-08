@@ -1,0 +1,88 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * EvoCode Agent 设计令牌（docs/03）。
+ * 当前仅定义 Dark 主题；未来新增 Light / 高对比主题时在此追加变量组，不改组件代码。
+ */
+@layer base {
+  :root {
+    /* 基础面：背景三层 + 边框 */
+    --background: 228 28% 5%;
+    --surface: 228 22% 8%;
+    --elevated: 227 20% 11%;
+    --hover: 227 18% 14%;
+    --border: 226 14% 17%;
+    --border-strong: 226 12% 24%;
+
+    /* 文本 */
+    --foreground: 220 25% 95%;
+    --foreground-secondary: 220 12% 68%;
+    --foreground-muted: 220 10% 46%;
+
+    /* 品牌与语义色（soft 为同色 12% 透明底） */
+    --primary: 258 88% 66%;
+    --primary-soft: rgba(139, 92, 246, 0.12);
+    --accent: 217 91% 62%;
+    --accent-soft: rgba(59, 130, 246, 0.12);
+    --success: 152 55% 45%;
+    --success-soft: rgba(52, 161, 115, 0.14);
+    --warning: 38 90% 56%;
+    --warning-soft: rgba(241, 164, 56, 0.13);
+    --danger: 352 74% 58%;
+    --danger-soft: rgba(229, 72, 77, 0.13);
+    --info: 199 89% 58%;
+    --info-soft: rgba(56, 189, 248, 0.12);
+    --cyan: 189 85% 55%;
+
+    /* 形状 */
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background font-sans text-base text-foreground antialiased;
+  }
+
+  /* 可访问性基线：键盘焦点环（docs/03 §8） */
+  :focus-visible {
+    outline: 2px solid hsl(var(--primary) / 0.6);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: hsl(var(--primary) / 0.35);
+  }
+
+  /* 深色细滚动条 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--border-strong)) transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: hsl(var(--border-strong));
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer utilities {
+  /* KPI 大数字等宽 */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}

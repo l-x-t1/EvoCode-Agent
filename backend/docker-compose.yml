@@ -1,0 +1,45 @@
+# EvoCode Agent 后端本地基础设施（docs/08 §5）
+# 用法：docker compose up -d postgres redis
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: evocode-postgres
+    environment:
+      POSTGRES_USER: evocode
+      POSTGRES_PASSWORD: evocode
+      POSTGRES_DB: evocode
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U evocode -d evocode"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: redis:7-alpine
+    container_name: evocode-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  # chromadb（P3 启用，届时取消注释并安装 chromadb 依赖）
+  # chroma:
+  #   image: chromadb/chroma:latest
+  #   container_name: evocode-chroma
+  #   ports:
+  #     - "8000:8000"
+  #   volumes:
+  #     - chromadata:/chroma/chroma
+
+volumes:
+  pgdata:
+  redisdata:

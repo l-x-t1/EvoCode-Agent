@@ -1,0 +1,8 @@
+pyproject.toml
+app/core/config.py
+app/core/logging.py
+evocode_backend.egg-info/PKG-INFO
+evocode_backend.egg-info/SOURCES.txt
+evocode_backend.egg-info/dependency_links.txt
+evocode_backend.egg-info/requires.txt
+evocode_backend.egg-info/top_level.txt
