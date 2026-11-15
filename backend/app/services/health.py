@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import time
-
 from app.core.logging import get_logger
 from app.db.redis import probe_redis
 from app.db.session import probe_database
@@ -24,9 +22,14 @@ def _probe_chroma() -> DependencyHealth:
 
 
 async def get_system_health() -> SystemHealth:
-    """各依赖状态 + 延迟；恒 200，故障体现在子项（前端按子项渲染）。"""
-    start = time.perf_counter()
-    api_latency = int((time.perf_counter() - start) * 1000)
+    """各依赖状态 + 延迟；恒 200，故障体现在子项（前端按子项渲染）。
+
+    api.latencyMs 为真实度量：最近一笔 HTTP 请求的处理耗时
+    （app.core.metrics，中间件写入）；无请求时如实报 0。
+    """
+    from app.core.metrics import last_request_latency_ms
+
+    api_latency = last_request_latency_ms()
 
     pg_ok, pg_latency = await probe_database()
     redis_ok, redis_latency = await probe_redis()

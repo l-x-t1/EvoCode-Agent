@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 5
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # B2 工具执行与隔离（应用层访问控制，非 OS 级沙箱；容器 Provider 见 core/sandbox.py）
+    WORKSPACE_BASE: str = "./data/workspace"
+    TOOL_TIMEOUT_SECONDS: int = 30
+    TOOL_MAX_RETRIES: int = 2
+    TOOL_MAX_STEPS: int = 20
+    TOOL_OUTPUT_LIMIT_BYTES: int = 1_000_000
+
     # 向量库（P3 启用）
     CHROMA_PERSIST_DIR: str = "./data/chroma"
 
