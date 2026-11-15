@@ -52,6 +52,89 @@ logger = get_logger(__name__)
 _VALID_POLICIES = ("auto", "require_approval", "disabled")
 
 
+def _tc_payload(tc: ToolCall) -> dict:
+    """ToolCall → 前端 types/api.ts ToolCall 形状（camelCase，SSE 事件内嵌）。"""
+    status = tc.status.value if hasattr(tc.status, "value") else str(tc.status)
+    risk = tc.risk.value if hasattr(tc.risk, "value") else str(tc.risk)
+    return {
+        "id": tc.id,
+        "runId": tc.run_id,
+        "stepId": tc.plan_step_id,
+        "server": tc.server,
+        "tool": tc.tool,
+        "args": tc.args or {},
+        "resultSummary": tc.result_summary,
+        "status": status,
+        "risk": risk,
+        "durationMs": tc.duration_ms,
+        "createdAt": tc.created_at.isoformat() if tc.created_at else None,
+    }
+
+
+def _apv_payload(apv: Approval) -> dict:
+    """Approval → 前端 types/api.ts Approval 形状。"""
+    status = apv.status.value if hasattr(apv.status, "value") else str(apv.status)
+    risk = apv.risk.value if hasattr(apv.risk, "value") else str(apv.risk)
+    return {
+        "id": apv.id,
+        "runId": apv.run_id,
+        "toolCallId": apv.tool_call_id,
+        "tool": apv.tool,
+        "summary": apv.summary,
+        "risk": risk,
+        "status": status,
+        "createdAt": apv.created_at.isoformat() if apv.created_at else None,
+        "resolvedAt": apv.resolved_at.isoformat() if apv.resolved_at else None,
+        "resolvedBy": str(apv.resolved_by.value) if getattr(apv.resolved_by, "value", None) else (str(apv.resolved_by) if apv.resolved_by else None),
+    }
+
+
+async def _emit_diff_event(session_add_log, run_id: str, tc: ToolCall, result: ToolResult) -> None:
+    """write_file 成功后合成真实 code.diff.created（difflib unified diff，B3 契约）。"""
+    import difflib
+
+    out = result.output or {}
+    prev = out.get("previousContent") or ""
+    new = out.get("content") or ""
+    if prev == new:
+        return
+    diff_lines = list(difflib.unified_diff(
+        prev.splitlines(), new.splitlines(),
+        fromfile=f"a/{out.get('path')}", tofile=f"b/{out.get('path')}", lineterm="",
+    ))
+    patch = "\n".join(diff_lines[:2000])
+    additions = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
+    deletions = sum(1 for l in diff_lines if l.startswith("-") and not l.startswith("---"))
+    await session_add_log(run_id, "code.diff.created", {
+        "diff": {
+            "id": f"diff_{tc.id}",
+            "runId": run_id,
+            "files": [{"path": out.get("path", ""), "additions": additions,
+                        "deletions": deletions, "patch": patch}],
+            "createdAt": (tc.created_at.isoformat() if tc.created_at else None),
+        },
+        "toolCallId": tc.id,
+    })
+
+
+async def _emit_test_event(session_add_log, run_id: str, tc: ToolCall, result: ToolResult) -> None:
+    """run_tests 成功后合成 test.finished（前端 TestResult 形状）。"""
+    out = result.output or {}
+    await session_add_log(run_id, "test.finished", {
+        "result": {
+            "id": f"test_{tc.id}",
+            "runId": run_id,
+            "passed": int(out.get("passed", 0)),
+            "failed": int(out.get("failed", 0)),
+            "skipped": int(out.get("skipped", 0)),
+            "failures": [],
+            "logTail": (out.get("logTail") or "")[-4000:],
+            "createdAt": (tc.created_at.isoformat() if tc.created_at else None),
+        },
+        "toolCallId": tc.id,
+    })
+
+
 @dataclass
 class ToolExecutionOutcome:
     """单次工具调用的执行结果（供 API 层/Agent 循环消费）。"""
@@ -219,6 +302,7 @@ class HarnessService:
             "toolCallId": tc.id,
             "tool": spec.full_name,
             "args": args,
+            "toolCall": _tc_payload(tc),
         })
 
         # d) 审批闸门：不执行，挂起等待人工决策
@@ -240,6 +324,8 @@ class HarnessService:
                 "tool": spec.full_name,
                 "risk": str(spec.risk.value if hasattr(spec.risk, "value") else spec.risk),
                 "summary": summary,
+                "status": "pending",
+                "approval": _apv_payload(apv),
             })
             return ToolExecutionOutcome(
                 status="suspended",
@@ -363,8 +449,15 @@ class HarnessService:
                         "summary": result.summary,
                         "attempts": attempt,
                         "durationMs": duration_ms,
+                        "toolCall": _tc_payload(tc),
                         **extra,
                     })
+                    # B3：语义事件（前端 runStore 消费 code.diff.created / test.finished）
+                    full_name = f"{spec.server}.{spec.name}"
+                    if full_name == "workspace.write_file":
+                        await _emit_diff_event(self._add_log, run.id, tc, result)
+                    elif full_name == "workspace.run_tests":
+                        await _emit_test_event(self._add_log, run.id, tc, result)
                     return ToolExecutionOutcome(
                         status="succeeded",
                         tool_call_id=tc.id,
@@ -386,6 +479,7 @@ class HarnessService:
             "attempts": executed_attempts,
             "error": tc.result_summary,
             "durationMs": duration_ms,
+            "toolCall": _tc_payload(tc),
             **extra,
         })
         return ToolExecutionOutcome(status="failed", tool_call_id=tc.id, summary=tc.result_summary or "")
@@ -482,10 +576,13 @@ class HarnessService:
             "toolCallId": tc.id,
             "approvalId": approval.id,
             "decision": "rejected",
+            "status": "rejected",
             "resolvedBy": "user",
+            "approval": _apv_payload(approval),
         })
         await self._add_log(run_id=tc.run_id, event_type="tool.call.cancelled", payload={
             "toolCallId": tc.id,
             "tool": approval.tool,
+            "toolCall": _tc_payload(tc),
         })
         return ToolExecutionOutcome(status="cancelled", tool_call_id=tc.id, approval_id=approval.id, summary="已拒绝")

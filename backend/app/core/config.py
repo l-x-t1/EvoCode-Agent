@@ -50,6 +50,17 @@ class Settings(BaseSettings):
     TOOL_MAX_STEPS: int = 20
     TOOL_OUTPUT_LIMIT_BYTES: int = 1_000_000
 
+    # B3 LLM / Agent 编排（真实模型参与决策；GLM_API_KEY 走环境变量，绝不入代码/日志）
+    GLM_MODEL: str = "glm-5.3"
+    GLM_FLASH_MODEL: str = "glm-5.3-flash"
+    LLM_TIMEOUT_SECONDS: int = 60
+    LLM_TEMPERATURE: float = 0.2
+    LLM_MAX_TOKENS: int = 4096
+    AGENT_MAX_REPLANS: int = 2
+    AGENT_STEP_TURNS: int = 6          # 单个 step 内最多 LLM 决策轮数
+    SSE_HEARTBEAT_SECONDS: int = 15
+    SSE_POLL_SECONDS: float = 0.5
+
     # 向量库（P3 启用）
     CHROMA_PERSIST_DIR: str = "./data/chroma"
 

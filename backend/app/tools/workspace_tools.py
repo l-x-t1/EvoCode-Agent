@@ -274,11 +274,23 @@ async def _write_file(ctx: ToolContext, args: dict) -> ToolResult:
         parent.mkdir(parents=True, exist_ok=True)
 
     data = content.encode("utf-8")
+    # 捕获写入前内容（供 Harness 生成真实 code.diff.created 事件；上限 100KB）
+    previous_content: str | None = None
+    if resolved.exists():
+        try:
+            previous_content = resolved.read_text("utf-8", errors="replace")[:100_000]
+        except OSError:
+            previous_content = None
     resolved.write_bytes(data)
     return ToolResult(
         ok=True,
         summary=f"写入 {path}（{len(data)} 字节）",
-        output={"path": path, "bytes": len(data)},
+        output={
+            "path": path,
+            "bytes": len(data),
+            "previousContent": previous_content,
+            "content": content[:100_000],
+        },
     )
 
 
