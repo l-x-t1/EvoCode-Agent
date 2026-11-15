@@ -120,12 +120,12 @@ class HarnessService:
     def _build_ctx(self, run: AgentRun, task: AgentTask) -> ToolContext:
         """构造 ToolContext：工作区 = WORKSPACE_BASE/<task_id>/。
 
+        Guard 以 WORKSPACE_BASE 为基目录，task_root(task.id) 创建并校验任务目录；
         路径类入参由各工具 handler 经 WorkspaceGuard.resolve 在工具层拒绝
         （Harness 只负责授权工作区的创建与注入）。
         """
         settings = get_settings()
-        workspace = Path(settings.WORKSPACE_BASE) / task.id
-        guard = WorkspaceGuard(workspace)
+        guard = WorkspaceGuard(Path(settings.WORKSPACE_BASE))
         task_root = guard.task_root(task.id)
         return ToolContext(
             run_id=run.id,
