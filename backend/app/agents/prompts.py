@@ -20,8 +20,8 @@ EXECUTOR_SYSTEM_TEMPLATE = """你是 EvoCode Agent 的 Executor，正在执行�
 {tool_catalog}
 
 决策要求：只输出一个 JSON 对象：
-- 需要调用工具时：{"action": "tool", "server": "...", "tool": "...", "args": {{...}}, "reason": "一句话理由"}
-- 步骤已完成时：{"action": "done", "summary": "一句话结果摘要"}
+- 需要调用工具时：{{"action": "tool", "server": "...", "tool": "...", "args": {{...}}, "reason": "一句话理由"}}
+- 步骤已完成时：{{"action": "done", "summary": "一句话结果摘要"}}
 约束：
 - 每次只调用一个工具；参数必须是工具 schema 允许的字段；
 - 只能操作授权工作区内的文件（相对路径）；
@@ -61,12 +61,15 @@ def plan_user_message(task_title: str, description: str, history: list[dict]) ->
 
 
 def executor_user_message(
-    step_title: str, step_detail: str | None, recent: list[dict], turn: int, max_turns: int
+    step_title: str, step_detail: str | None, recent: list[dict], turn: int, max_turns: int,
+    context_block: str | None = None,
 ) -> str:
     parts = [f"当前步骤：{step_title}"]
     if step_detail:
         parts.append(f"步骤要求：{step_detail}")
     parts.append(f"本步骤第 {turn}/{max_turns} 轮决策。")
+    if context_block:
+        parts.append(context_block)
     if recent:
         parts.append("最近工具/执行记录：")
         for r in recent[-8:]:

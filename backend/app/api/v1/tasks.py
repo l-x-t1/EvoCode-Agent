@@ -49,7 +49,7 @@ async def create_task(
     session: AsyncSession = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> TaskOut:
-    return await TasksService(session, _redis_or_none()).create_task(
+    out = await TasksService(session, _redis_or_none()).create_task(
         user_id=user.id,
         title=body.title,
         description=body.description,
@@ -58,6 +58,11 @@ async def create_task(
         skill_ids=body.skillIds,
         idempotency_key=idempotency_key,
     )
+    # B3：任务创建后拉起 Agent run（编排器内部等待事务可见；LLM 未配置时保持 queued）
+    from app.agents.orchestrator import get_orchestrator
+
+    get_orchestrator().schedule_start(out.id)
+    return out
 
 
 @router.get("/{task_id}", response_model=TaskOut)

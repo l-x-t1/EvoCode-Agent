@@ -28,5 +28,12 @@ async def resolve_approval(
     body: ApprovalDecisionIn,
     session: AsyncSession = Depends(get_db),
 ) -> ApprovalOut:
-    """审批决策：仅 pending 可决策，重复决策 409（状态机守卫，docs/08 §8-4）。"""
-    return await ApprovalsService(session).resolve(approval_id, body)
+    """审批决策：仅 pending 可决策，重复决策 409（状态机守卫，docs/08 §8-4）。
+
+    B3：决策后调度编排器恢复执行流（批准→续跑原位置；拒绝→replanner）。
+    """
+    out = await ApprovalsService(session).resolve(approval_id, body)
+    from app.agents.orchestrator import get_orchestrator
+
+    get_orchestrator().schedule_resume(approval_id, body.decision)
+    return out
