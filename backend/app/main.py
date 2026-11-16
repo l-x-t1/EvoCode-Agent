@@ -35,7 +35,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:  #应用启动和关闭�
     init_engine(settings)
     init_redis(settings)
     logger.info("%s v%s 启动（env=%s）", settings.APP_NAME, settings.APP_VERSION, settings.ENV)
+    # B3：服务重启恢复——重扫非终态 run 继续推进（LLM 未配置时如实告警不驱动）
+    import asyncio
+
+    from app.agents.orchestrator import get_orchestrator
+
+    async def _recover() -> None:
+        await asyncio.sleep(2)  # 等待依赖就绪
+        await get_orchestrator().recover_on_startup()
+
+    recovery_task = asyncio.create_task(_recover())
     yield   #上面是应用启动时，下面是应用关闭时执行
+    recovery_task.cancel()
     await close_redis()
     await dispose_engine()
     logger.info("应用已关闭，连接已释放")
