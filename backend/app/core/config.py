@@ -61,6 +61,15 @@ class Settings(BaseSettings):
     SSE_HEARTBEAT_SECONDS: int = 15
     SSE_POLL_SECONDS: float = 0.5
 
+    # B6 RAG（Embedding Provider 独立抽象，不与主对话模型强绑定）
+    GLM_EMBEDDING_MODEL: str = "embedding-3"
+    GLM_EMBEDDING_DIM: int = 1024
+    RAG_DATA_DIR: str = "./data/rag"
+    RAG_CHUNK_CHARS: int = 800
+    RAG_CHUNK_OVERLAP: int = 100
+    RAG_TOPK: int = 5
+    RAG_RRF_K: int = 60
+
     # 向量库（P3 启用）
     CHROMA_PERSIST_DIR: str = "./data/chroma"
 

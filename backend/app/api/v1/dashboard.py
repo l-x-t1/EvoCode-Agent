@@ -1,4 +1,8 @@
-"""dashboard / agents / skills-events 路由（docs/06 §3.1）。"""
+"""dashboard / agents 路由（docs/06 §3.1）。
+
+Skill 事件流（/skills/events）自 B5 起由 skills 路由提供（支持 skillId 过滤），
+此处不再重复注册——同名路由先注册者优先，会吞掉 skillId 参数导致过滤失效。
+"""
 
 from __future__ import annotations
 
@@ -10,7 +14,6 @@ from app.schemas.dashboard import (
     AgentStatusOut,
     DashboardSummaryOut,
     DashboardTrendsOut,
-    SkillEventListOut,
 )
 from app.services.dashboard import DashboardService
 
@@ -33,11 +36,3 @@ async def dashboard_trends(
 @router.get("/agents/status", response_model=AgentStatusOut)
 async def agents_status(session: AsyncSession = Depends(get_db)) -> AgentStatusOut:
     return await DashboardService(session).agent_status()
-
-
-@router.get("/skills/events", response_model=SkillEventListOut)
-async def skill_events(
-    limit: int = Query(default=10, ge=1, le=50),
-    session: AsyncSession = Depends(get_db),
-) -> SkillEventListOut:
-    return await DashboardService(session).skill_events(limit)

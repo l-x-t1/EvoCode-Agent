@@ -120,22 +120,3 @@ class DashboardRepository(BaseRepository):
             select(AgentRun.status, func.count()).group_by(AgentRun.status)
         )).all()
         return {str(s): int(n) for s, n in rows}
-
-    async def latest_skill_events(self, limit: int) -> list[Any]:
-        """Skill 事件流：skill_versions(created) + skill_candidates(proposed/approved/rejected)
-        按 created_at 取最新 limit 条。"""
-        versions = (await self.session.execute(
-            select(SkillVersion).order_by(SkillVersion.created_at.desc()).limit(limit)
-        )).scalars().all()
-        candidates = (await self.session.execute(
-            select(SkillCandidate).order_by(SkillCandidate.created_at.desc()).limit(limit)
-        )).scalars().all()
-        items: list[tuple[datetime, Any]] = [
-            (v.created_at, v) for v in versions
-        ] + [(c.created_at, c) for c in candidates]
-        items.sort(key=lambda x: x[0], reverse=True)
-        return [obj for _, obj in items[:limit]]
-
-    async def skill_name_map(self) -> dict[str, str]:
-        rows = (await self.session.execute(select(Skill.id, Skill.name))).all()
-        return {r.id: r.name for r in rows}

@@ -10,8 +10,6 @@ from app.schemas.dashboard import (
     AgentStatusOut,
     DashboardSummaryOut,
     DashboardTrendsOut,
-    SkillEventListOut,
-    SkillEventOut,
     TaskTrendPoint,
     TokenTrendPoint,
 )
@@ -78,30 +76,5 @@ class DashboardService:
             AgentStatusItem(name="replanner", value=steps.get("replanner", 0)),
         ]
         return AgentStatusOut(total=sum(i.value for i in items) + runs.get("queued", 0), items=items)
-
-    async def skill_events(self, limit: int = 10) -> SkillEventListOut:
-        rows = await self.repo.latest_skill_events(limit)
-        names = await self.repo.skill_name_map()
-        items: list[SkillEventOut] = []
-        for obj in rows:
-            created = obj.created_at
-            if hasattr(obj, "version"):  # SkillVersion → created
-                items.append(SkillEventOut(
-                    id=obj.id,
-                    skill_id=obj.skill_id,
-                    type="created",
-                    message=f"{names.get(obj.skill_id, 'Skill')} v{obj.version} 发布",
-                    created_at=created.isoformat(),
-                ))
-            else:  # SkillCandidate → proposed/approved/rejected
-                items.append(SkillEventOut(
-                    id=obj.id,
-                    skill_id=obj.skill_id,
-                    type=str(obj.status) if str(obj.status) != "pending" else "proposed",
-                    message=f"候选 Skill（{obj.kind}）：{obj.summary[:80]}",
-                    created_at=created.isoformat(),
-                ))
-        return SkillEventListOut(items=items)
-
 
 _RUNNING_STATUSES_IMPL = ("queued", "planning", "executing", "reviewing", "waiting_approval")
