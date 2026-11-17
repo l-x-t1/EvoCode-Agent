@@ -12,7 +12,6 @@
 from __future__ import annotations
 
 import base64
-import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -80,7 +79,6 @@ class ChartQaResult:
 
 
 def _parse_json_block(text: str) -> dict:
-    """与 llm.client.extract_json_block 同语义（局部复用避免跨包耦合）。"""
     from app.llm.client import extract_json_block
 
     return extract_json_block(text)
@@ -127,7 +125,6 @@ class GLMVisionClient(BaseVisionClient):
         self._timeout = timeout or settings.MULTIMODAL_TIMEOUT_SECONDS
         self._transport = transport
 
-    # ------------------------------------------------------------------ 底层
     def _ensure_configured(self) -> None:
         if not self._api_key.strip():
             raise BizException(ErrorCode.MODEL_UNAVAILABLE,
@@ -140,8 +137,7 @@ class GLMVisionClient(BaseVisionClient):
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": [
-                    {"type": "image_url",
-                     "image_url": {"url": data_url}},
+                    {"type": "image_url", "image_url": {"url": data_url}},
                     {"type": "text", "text": user_text},
                 ]},
             ],
@@ -173,7 +169,6 @@ class GLMVisionClient(BaseVisionClient):
                                status_code=502) from exc
         return _parse_json_block(content)
 
-    # ------------------------------------------------------------------ 三能力
     async def ocr(self, image: MultimodalInput) -> OcrResult:
         self._ensure_configured()
         settings = get_settings()

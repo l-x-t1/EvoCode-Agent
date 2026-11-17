@@ -7,11 +7,9 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timezone
 
 import httpx
 import pytest
-import pytest_asyncio
 
 from app.core.config import get_settings
 from app.core.exceptions import BizException
@@ -25,13 +23,6 @@ def _client(handler) -> GLMVisionClient:
     return GLMVisionClient(api_key="k", base_url="https://fake.example/v4",
                            model="glm-4v-plus", timeout=5,
                            transport=httpx.MockTransport(handler))
-
-
-def _chat_handler(content: dict):
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [
-            {"message": {"content": json.dumps(content, ensure_ascii=False)}}]})
-    return handler
 
 
 def _inp(mime: str = "image/png") -> MultimodalInput:
@@ -136,14 +127,11 @@ async def test_ocr_and_index_app_client(app_client: AsyncClient, deps_available:
         return httpx.Response(200, json={"choices": [
             {"message": {"content": json.dumps(ocr_content, ensure_ascii=False)}}]})
 
-    # 注入带 key 的客户端（MockTransport）
     import app.api.v1.multimodal as mm
 
     original_factory = mm.get_vision_client
     vision = _client(handler)
     try:
-        import app.api.v1.multimodal as mm
-
         mm.get_vision_client = lambda: vision
         r = await app_client.post("/api/v1/multimodal/ocr-and-index", json={
             "filename": "deploy-checklist.png", "dataBase64": PNG_B64, "mime": "image/png"})
@@ -151,7 +139,6 @@ async def test_ocr_and_index_app_client(app_client: AsyncClient, deps_available:
         body = r.json()
         assert body["ocr"]["text"].startswith("部署检查清单")
         assert body["indexed"]["chunkCount"] >= 1
-        # 图片文字已入 RAG 语料：可检索命中（图片与文档关联）
         r2 = await app_client.post("/api/v1/memory/search",
                                    json={"query": "灰度 流量", "topK": 3})
         hits = [i for i in r2.json()["items"] if i["source"] == "document"
@@ -187,4 +174,3 @@ async def test_ocr_empty_text_rejected(app_client: AsyncClient, deps_available: 
         mm.get_vision_client = original_factory
         settings.RAG_DATA_DIR = old_dir
         reset_rag_service()
-

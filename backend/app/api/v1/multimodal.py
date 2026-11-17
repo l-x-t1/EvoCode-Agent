@@ -6,11 +6,16 @@ JSON 入参：{filename, dataBase64, mime}（前端上传入口随 B8）；
 
 from __future__ import annotations
 
+import base64
+import binascii
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
+from app.core.exceptions import BizException
+from app.core.response import ErrorCode
 from app.multimodal.vision import MultimodalInput, get_vision_client
 from app.rag.service import get_rag_service
 
@@ -32,23 +37,17 @@ class OcrAndIndexIn(ImageIn):
 
 
 def _to_input(body: ImageIn) -> MultimodalInput:
-    import base64
-    import binascii
-
     try:
         data = base64.b64decode(body.dataBase64, validate=True)
     except (binascii.Error, ValueError) as exc:
-        from app.core.exceptions import BizException
-        from app.core.response import ErrorCode
-
         raise BizException(ErrorCode.VALIDATION_ERROR, "dataBase64 不是合法 Base64",
                            status_code=422) from exc
     return MultimodalInput(filename=body.filename, data=data, mime=body.mime)
 
 
 @router.post("/ocr")
-async def ocr_image(body: ImageIn, session: AsyncSession = Depends(get_db)) -> dict:
-    """能力一：OCR。图片 → 文本（含区域定位）。"""
+async def ocr_image(body: ImageIn, _: AsyncSession = Depends(get_db)) -> dict:
+    """能力一：OCR。图片 → 文本（含区域定位与页码来源）。"""
     result = await get_vision_client().ocr(_to_input(body))
     return {"text": result.text, "regions": result.regions,
             "language": result.language, "filename": body.filename}
@@ -75,14 +74,11 @@ async def ocr_and_index(body: OcrAndIndexIn, _: AsyncSession = Depends(get_db)) 
     """OCR + 图片与文档关联：识别文字导入 RAG 语料（docId 缺省用图片文件名）。"""
     result = await get_vision_client().ocr(_to_input(body))
     if not result.text.strip():
-        from app.core.exceptions import BizException
-        from app.core.response import ErrorCode
-
         raise BizException(ErrorCode.INVALID_REQUEST, "OCR 未提取到文字，无法建立索引",
                            status_code=422)
     rag = get_rag_service()
     doc_id = body.docId or body.filename.rsplit(".", 1)[0]
-    content = (f"# {body.filename}（OCR）\n\n" + result.text)
+    content = f"# {body.filename}（OCR）\n\n" + result.text
     import_result = await rag.import_document(f"{doc_id}.ocr.md", content.encode("utf-8"))
     return {"ocr": {"text": result.text, "regions": result.regions,
                     "language": result.language},

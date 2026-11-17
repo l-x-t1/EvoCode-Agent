@@ -1,84 +1,74 @@
-"""eval 域 schema（B8）：与前端 types/api.ts EvalOverview/EvalModelCompare/EvalSkillDelta/EvalRun 对齐。
-
-compression 端点前端暂无类型：形状 {items: [{runId, version, trigger, beforeTokens,
-afterTokens, compressedAt}]}（context_snapshots 非 initial 行）。
-"""
+"""Evaluation 响应模型（对齐前端 types/api.ts EvalOverview/ModelCompare/SkillDelta/EvalRun）。"""
 
 from __future__ import annotations
 
-from datetime import datetime
-
-from pydantic import BaseModel, ConfigDict
-from pydantic.alias_generators import to_camel
-
-from app.core.response import Page
+from pydantic import BaseModel
 
 
-class CamelModel(BaseModel):
-    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
-
-
-class EvalTrendPointOut(CamelModel):
+class EvalTrendPoint(BaseModel):
     date: str
     overall: int
-    by_type: dict[str, int] = {}
+    byType: dict[str, int]
 
 
-class EvalOverviewOut(CamelModel):
+class EvalOverviewOut(BaseModel):
     range: str
-    success_rate: float
-    avg_duration_ms: int
-    avg_cost_per_task: float
-    compression_rate: float
-    trend: list[EvalTrendPointOut] = []
+    successRate: float
+    avgDurationMs: int
+    avgCostPerTask: float
+    compressionRate: float
+    trend: list[EvalTrendPoint] = []
 
 
-class EvalModelCompareOut(CamelModel):
+class EvalModelCompareOut(BaseModel):
     model: str
-    success_rate: float
-    avg_duration_ms: int
-    avg_cost: float
-    sample_size: int
+    successRate: float
+    avgDurationMs: int
+    avgCost: float
+    sampleSize: int
 
 
-class EvalSkillDeltaOut(CamelModel):
-    skill_id: str
+class EvalSkillDeltaOut(BaseModel):
+    skillId: str
     name: str
     before: float
     after: float
     delta: float
-    sample_size: int
+    sampleSize: int
 
 
-class CompressionItemOut(CamelModel):
-    run_id: str
+class EvalCompressionItemOut(BaseModel):
+    runId: str
     version: int
     trigger: str
-    before_tokens: int | None = None
-    after_tokens: int | None = None
-    compressed_at: datetime | None = None
+    beforeTokens: int | None = None
+    afterTokens: int | None = None
+    compressedAt: str | None = None
 
 
-class CompressionListOut(CamelModel):
-    items: list[CompressionItemOut] = []
+class EvalCompressionOut(BaseModel):
+    items: list[EvalCompressionItemOut] = []
 
 
-class EvalCaseOut(CamelModel):
-    task_id: str
+class EvalRunCaseOut(BaseModel):
+    taskId: str
     title: str
     passed: bool
     tokens: int
 
 
-class EvalRunOut(CamelModel):
+class EvalRunOut(BaseModel):
     id: str
     suite: str
-    task_count: int
-    success_rate: float
-    avg_tokens: int
-    created_at: datetime
-    cases: list[EvalCaseOut] = []
+    taskCount: int
+    successRate: float
+    avgTokens: int
+    createdAt: str | None = None
+    cases: list[EvalRunCaseOut] = []
 
 
-class EvalRunPage(Page[EvalRunOut]):
-    """分页 {items,total,page,size}；cases 当前恒为空数组（eval_cases 未接入）。"""
+class EvalRunPage(BaseModel):
+    items: list[EvalRunOut] = []
+    total: int = 0
+    page: int = 1
+    size: int = 20

@@ -1,14 +1,8 @@
-"""eval 域路由（B8）：overview / models / skills / compression / runs。
-
-全部真实 SQL 聚合（date_trunc UTC 日风格与 dashboard repo 一致），零虚构：
-- eval_runs 当前为空表 → /eval/runs 如实返回 items=[]、total=0
-- compression：context_snapshots 非 initial 行（前端暂无类型，形状见 schemas/eval.py）
-"""
+"""Evaluation 路由（B8）：全 SQL 真实聚合，零虚构。"""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import case, func, select
@@ -16,50 +10,39 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
 from app.models.context import ContextSnapshot
-from app.models.evaluation import EvalRun
 from app.models.misc import ModelUsage
 from app.models.skill import Skill, SkillEvaluation
 from app.models.task import AgentRun, AgentTask
 from app.schemas.eval import (
-    CompressionItemOut,
-    CompressionListOut,
+    EvalCompressionItemOut,
+    EvalCompressionOut,
     EvalModelCompareOut,
     EvalOverviewOut,
-    EvalRunPage,
     EvalRunOut,
+    EvalRunPage,
     EvalSkillDeltaOut,
-    EvalTrendPointOut,
+    EvalTrendPoint,
 )
 
-router = APIRouter(prefix="/eval", tags=["eval"])
+router = APIRouter(prefix="/eval", tags=["evaluation"])
 
-_RANGE_DAYS = {"7d": 7, "30d": 30, "90d": 90}
+_RANGES = {"7d": 7, "30d": 30, "90d": 90}
 
 
-def _window_start(range_key: str) -> datetime:
-    days = _RANGE_DAYS[range_key]
+def _range_or_422(range: str) -> int:
+    days = _RANGES.get(range)
+    if days is None:
+        from app.core.exceptions import BizException
+        from app.core.response import ErrorCode
+
+        raise BizException(ErrorCode.VALIDATION_ERROR,
+                           f"range 仅支持 {', '.join(_RANGES)}", status_code=422)
+    return days
+
+
+def _since(days: int) -> datetime:
     return datetime.now(timezone.utc).replace(
-        hour=0, minute=0, second=0, microsecond=0
-    ) - timedelta(days=days - 1)
-
-
-def _trend_points(rows: list[Any], days: int, start: datetime) -> list[EvalTrendPointOut]:
-    by_date = {r.day.date().isoformat(): r for r in rows}
-    out: list[EvalTrendPointOut] = []
-    for i in range(days):
-        d = (start + timedelta(days=i)).date().isoformat()
-        r = by_date.get(d)
-        out.append(
-            EvalTrendPointOut(
-                date=d,
-                overall=int(r.created) if r else 0,
-                by_type={
-                    "created": int(r.succeeded or 0) if r else 0,
-                    "failed": int(r.failed or 0) if r else 0,
-                },
-            )
-        )
-    return out
+        hour=0, minute=0, second=0, microsecond=0) - timedelta(days=days - 1)
 
 
 @router.get("/overview", response_model=EvalOverviewOut)
@@ -67,192 +50,115 @@ async def eval_overview(
     range: str = Query(default="7d", pattern="^(7d|30d|90d)$"),
     session: AsyncSession = Depends(get_db),
 ) -> EvalOverviewOut:
-    start = _window_start(range)
-    days = _RANGE_DAYS[range]
-
-    counts = {
-        str(s): int(n)
-        for s, n in (
-            await session.execute(
-                select(AgentTask.status, func.count())
-                .where(AgentTask.created_at >= start)
-                .group_by(AgentTask.status)
-            )
-        ).all()
-    }
-    completed, failed = counts.get("completed", 0), counts.get("failed", 0)
+    days = _range_or_422(range)
+    since = _since(days)
+    counts = dict((await session.execute(
+        select(AgentTask.status, func.count()).group_by(AgentTask.status)
+    )).all())
+    counts = {str(s): int(n) for s, n in counts.items()}
+    completed = counts.get("completed", 0)
+    failed = counts.get("failed", 0)
     terminal = completed + failed
     success_rate = round(completed / terminal, 4) if terminal else 0.0
 
-    task_count = int(
-        (
-            await session.execute(
-                select(func.count()).select_from(AgentTask).where(AgentTask.created_at >= start)
-            )
-        ).scalar_one()
-    )
-    run_count = int(
-        (
-            await session.execute(
-                select(func.count()).select_from(AgentRun).where(AgentRun.created_at >= start)
-            )
-        ).scalar_one()
-    )
+    avg_duration = int((await session.execute(
+        select(func.coalesce(func.avg(AgentRun.duration_ms), 0))
+        .where(AgentRun.status == "completed", AgentRun.finished_at >= since)
+    )).scalar_one())
+    cost_total = float((await session.execute(
+        select(func.coalesce(func.sum(ModelUsage.cost), 0))
+        .where(ModelUsage.created_at >= since)
+    )).scalar_one())
+    tasks_total = sum(counts.values())
+    avg_cost = round(cost_total / tasks_total, 6) if tasks_total else 0.0
+    compressions = int((await session.execute(
+        select(func.count()).select_from(ContextSnapshot)
+        .where(ContextSnapshot.trigger != "initial", ContextSnapshot.created_at >= since)
+    )).scalar_one())
+    compression_rate = round(compressions / max(len((await session.execute(
+        select(AgentRun.id)).all())), 1), 4)
 
-    avg_duration = (
-        await session.execute(
-            select(func.avg(AgentRun.duration_ms))
-            .where(AgentRun.created_at >= start, AgentRun.status == "completed")
-        )
-    ).scalar_one()
-    avg_duration_ms = int(round(float(avg_duration))) if avg_duration is not None else 0
-
-    cost_sum = (
-        await session.execute(
-            select(func.coalesce(func.sum(ModelUsage.cost), 0)).where(ModelUsage.created_at >= start)
-        )
-    ).scalar_one()
-    avg_cost = float(cost_sum) / task_count if task_count else 0.0
-
-    compressed = int(
-        (
-            await session.execute(
-                select(func.count())
-                .select_from(ContextSnapshot)
-                .where(ContextSnapshot.created_at >= start, ContextSnapshot.trigger != "initial")
-            )
-        ).scalar_one()
-    )
-    compression_rate = round(compressed / max(run_count, 1), 4)
-
+    # 按日趋势（created/succeeded/failed，零填充）
     day = func.date_trunc("day", AgentTask.created_at).label("day")
-    trend_rows = (
-        await session.execute(
-            select(
-                day,
-                func.count().label("created"),
-                func.sum(case((AgentTask.status == "completed", 1), else_=0)).label("succeeded"),
-                func.sum(case((AgentTask.status == "failed", 1), else_=0)).label("failed"),
-            )
-            .where(AgentTask.created_at >= start)
-            .group_by(day)
-        )
-    ).all()
-
+    rows = (await session.execute(
+        select(day,
+               func.count().label("created"),
+               func.sum(case((AgentTask.status == "completed", 1), else_=0)),
+               func.sum(case((AgentTask.status == "failed", 1), else_=0)))
+        .where(AgentTask.created_at >= since).group_by(day)
+    )).all()
+    by_date = {r.day.date().isoformat(): r for r in rows}
+    trend = []
+    for i in range(days):
+        d = (_since(days) + timedelta(days=i)).date().isoformat()
+        r = by_date.get(d)
+        trend.append(EvalTrendPoint(
+            date=d, overall=int(r.created) if r else 0,
+            byType={"created": int(r.created) if r else 0,
+                    "succeeded": int(r.succeeded or 0) if r else 0,
+                    "failed": int(r.failed or 0) if r else 0}))
     return EvalOverviewOut(
-        range=range,
-        success_rate=success_rate,
-        avg_duration_ms=avg_duration_ms,
-        avg_cost_per_task=round(avg_cost, 6),
-        compression_rate=compression_rate,
-        trend=_trend_points(trend_rows, days, start),
-    )
+        range=range, successRate=success_rate, avgDurationMs=avg_duration,
+        avgCostPerTask=avg_cost, compressionRate=compression_rate, trend=trend)
 
 
 @router.get("/models", response_model=list[EvalModelCompareOut])
 async def eval_models(
-    range: str = Query(default="7d", pattern="^(7d|30d|90d)$"),
+    range: str = Query(default="30d", pattern="^(7d|30d|90d)$"),
     session: AsyncSession = Depends(get_db),
 ) -> list[EvalModelCompareOut]:
-    start = _window_start(range)
-    rows = (
-        await session.execute(
-            select(
-                AgentRun.model,
-                func.count().label("sample_size"),
-                func.sum(case((AgentRun.status == "completed", 1), else_=0)).label("completed"),
-                func.avg(AgentRun.duration_ms).label("avg_duration"),
-            )
-            .where(AgentRun.created_at >= start)
-            .group_by(AgentRun.model)
-        )
-    ).all()
-    cost_rows = {
-        r.model: float(r.cost_sum or 0)
-        for r in (
-            await session.execute(
-                select(
-                    AgentRun.model,
-                    func.coalesce(func.sum(ModelUsage.cost), 0).label("cost_sum"),
-                )
-                .join(ModelUsage, ModelUsage.run_id == AgentRun.id, isouter=True)
-                .where(AgentRun.created_at >= start)
-                .group_by(AgentRun.model)
-            )
-        ).all()
-    }
+    days = _range_or_422(range)
+    rows = (await session.execute(
+        select(AgentRun.model, func.count(), func.avg(AgentRun.duration_ms),
+               func.sum(case((AgentRun.status == "completed", 1), else_=0)))
+        .group_by(AgentRun.model)
+    )).all()
     out: list[EvalModelCompareOut] = []
-    for r in rows:
-        n = int(r.sample_size)
-        out.append(
-            EvalModelCompareOut(
-                model=str(r.model),
-                success_rate=round(int(r.completed or 0) / n, 4) if n else 0.0,
-                avg_duration_ms=int(round(float(r.avg_duration))) if r.avg_duration is not None else 0,
-                avg_cost=round(cost_rows.get(str(r.model), 0.0) / n, 6) if n else 0.0,
-                sample_size=n,
-            )
-        )
+    for model, sample, avg_dur, succeeded in rows:
+        cost = float((await session.execute(
+            select(func.coalesce(func.sum(ModelUsage.cost), 0))
+            .where(ModelUsage.run_id.in_(select(AgentRun.id).where(AgentRun.model == model)))
+        )).scalar_one())
+        out.append(EvalModelCompareOut(
+            model=str(model), sampleSize=int(sample),
+            successRate=round(float(succeeded or 0) / int(sample), 4) if sample else 0.0,
+            avgDurationMs=int(avg_dur or 0), avgCost=round(cost / int(sample), 6) if sample else 0.0))
     return out
 
 
 @router.get("/skills", response_model=list[EvalSkillDeltaOut])
 async def eval_skills(
-    range: str = Query(default="7d", pattern="^(7d|30d|90d)$"),
+    range: str = Query(default="30d", pattern="^(7d|30d|90d)$"),
     session: AsyncSession = Depends(get_db),
 ) -> list[EvalSkillDeltaOut]:
-    start = _window_start(range)
-    rows = (
-        await session.execute(
-            select(SkillEvaluation, Skill.name)
-            .join(Skill, SkillEvaluation.skill_id == Skill.id)
-            .where(SkillEvaluation.created_at >= start)
-            .order_by(SkillEvaluation.created_at.desc())
-        )
-    ).all()
-    out: list[EvalSkillDeltaOut] = []
-    for ev, name in rows:
-        before, after = float(ev.before_score), float(ev.after_score)
-        out.append(
-            EvalSkillDeltaOut(
-                skill_id=ev.skill_id,
-                name=name,
-                before=before,
-                after=after,
-                delta=round(after - before, 4),
-                sample_size=int(ev.sample_size),
-            )
-        )
-    return out
+    _range_or_422(range)
+    rows = (await session.execute(
+        select(SkillEvaluation, Skill.name).join(Skill, SkillEvaluation.skill_id == Skill.id)
+        .order_by(SkillEvaluation.created_at.desc())
+    )).all()
+    return [EvalSkillDeltaOut(
+        skillId=e.skill_id, name=name, before=float(e.before_score),
+        after=float(e.after_score), delta=round(float(e.after_score) - float(e.before_score), 4),
+        sampleSize=e.sample_size) for e, name in rows]
 
 
-@router.get("/compression", response_model=CompressionListOut)
+@router.get("/compression", response_model=EvalCompressionOut)
 async def eval_compression(
-    range: str = Query(default="7d", pattern="^(7d|30d|90d)$"),
+    range: str = Query(default="30d", pattern="^(7d|30d|90d)$"),
     session: AsyncSession = Depends(get_db),
-) -> CompressionListOut:
-    start = _window_start(range)
-    rows = (
-        await session.execute(
-            select(ContextSnapshot)
-            .where(ContextSnapshot.created_at >= start, ContextSnapshot.trigger != "initial")
-            .order_by(ContextSnapshot.compressed_at.desc().nullslast(), ContextSnapshot.created_at.desc())
-            .limit(200)
-        )
-    ).scalars().all()
-    return CompressionListOut(
-        items=[
-            CompressionItemOut(
-                run_id=s.run_id,
-                version=int(s.version),
-                trigger=str(s.trigger),
-                before_tokens=s.before_tokens,
-                after_tokens=s.after_tokens,
-                compressed_at=s.compressed_at,
-            )
-            for s in rows
-        ]
-    )
+) -> EvalCompressionOut:
+    days = _range_or_422(range)
+    rows = (await session.execute(
+        select(ContextSnapshot)
+        .where(ContextSnapshot.trigger != "initial", ContextSnapshot.created_at >= _since(days))
+        .order_by(ContextSnapshot.compressed_at.desc())
+        .limit(50)
+    )).scalars().all()
+    return EvalCompressionOut(items=[EvalCompressionItemOut(
+        runId=s.run_id, version=s.version, trigger=str(s.trigger.value),
+        beforeTokens=s.before_tokens, afterTokens=s.after_tokens,
+        compressedAt=s.compressed_at.isoformat() if s.compressed_at else None,
+    ) for s in rows])
 
 
 @router.get("/runs", response_model=EvalRunPage)
@@ -261,33 +167,19 @@ async def eval_runs(
     size: int = Query(default=20, ge=1, le=100),
     session: AsyncSession = Depends(get_db),
 ) -> EvalRunPage:
-    total = int(
-        (
-            await session.execute(select(func.count()).select_from(EvalRun))
-        ).scalar_one()
-    )
-    rows = (
-        await session.execute(
-            select(EvalRun)
-            .order_by(EvalRun.created_at.desc())
-            .offset((page - 1) * size)
-            .limit(size)
-        )
-    ).scalars().all()
-    return EvalRunPage(
-        items=[
-            EvalRunOut(
-                id=r.id,
-                suite=r.suite,
-                task_count=int(r.task_count),
-                success_rate=float(r.success_rate),
-                avg_tokens=int(r.avg_tokens),
-                created_at=r.created_at,
-                cases=[],  # eval_cases 未接入，如实返回空数组
-            )
-            for r in rows
-        ],
-        total=total,
-        page=page,
-        size=size,
-    )
+    """评测批次：eval_runs 表当前无写入路径（评测器属后续批次），如实返回空。"""
+    from app.models.evaluation import EvalRun as EvalRunModel  # 评测批次表（写入属后续批次）
+
+    try:
+        total = (await session.execute(
+            select(func.count()).select_from(EvalRunModel))).scalar_one()
+    except Exception:  # noqa: BLE001 - 表不存在/未启用时如实返回空
+        return EvalRunPage(items=[], total=0, page=page, size=size)
+    if total == 0:
+        return EvalRunPage(items=[], total=0, page=page, size=size)
+    rows = list((await session.execute(
+        select(EvalRunModel).offset((page - 1) * size).limit(size))).scalars().all())
+    return EvalRunPage(items=[EvalRunOut(
+        id=r.id, suite=r.suite, taskCount=r.task_count, successRate=float(r.success_rate),
+        avgTokens=r.avg_tokens, createdAt=r.created_at.isoformat() if r.created_at else None)
+        for r in rows], total=int(total), page=page, size=size)

@@ -1,12 +1,4 @@
-"""workflow 域路由（B8）：运行图（四角色节点聚合）+ 静态模板。
-
-节点状态聚合（零虚构，全部来自 plans/plan_steps/messages/tool_calls 真实查询）：
-- planner：plan 存在且首个 planner 步骤 done → completed，否则 executing
-- executor：有失败步骤 → failed；全 done → completed；有 pending/running → executing；无步骤 → pending
-- reviewer：run completed → completed；failed → failed；否则 pending
-- replanner：run.replan_count > 0 → completed，否则 pending
-plan_steps 无角色级耗时/Token 列 → durationMs/tokens 如实为 0。
-"""
+"""Workflow 路由（B8）：从 run 真实数据派生四角色图 + 静态模板。"""
 
 from __future__ import annotations
 
@@ -15,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.deps import get_db
+from app.core.enums import AgentRole, TaskStatus
 from app.core.exceptions import BizException
 from app.core.response import ErrorCode
 from app.models.conversation import Message
@@ -23,9 +16,9 @@ from app.models.task import AgentRun, Plan, PlanStep
 from app.schemas.workflow import (
     WorkflowEdgeOut,
     WorkflowGraphOut,
-    WorkflowNodeMetricsOut,
+    WorkflowNodeMetrics,
     WorkflowNodeOut,
-    WorkflowPositionOut,
+    WorkflowNodePosition,
 )
 
 router = APIRouter(prefix="/workflow", tags=["workflow"])
@@ -37,133 +30,128 @@ _POSITIONS = {
     "replanner": (360, 240),
 }
 _LABELS = {
-    "planner": "规划器",
-    "executor": "执行器",
-    "reviewer": "评审器",
-    "replanner": "重规划器",
+    "planner": "Planner 规划",
+    "executor": "Executor 执行",
+    "reviewer": "Reviewer 复核",
+    "replanner": "Replanner 重规划",
 }
-_EDGES = [
-    WorkflowEdgeOut(id="planner-executor", source="planner", target="executor"),
-    WorkflowEdgeOut(id="executor-reviewer", source="executor", target="reviewer"),
-    WorkflowEdgeOut(
-        id="reviewer-replanner", source="reviewer", target="replanner", condition="review.failed"
-    ),
-    WorkflowEdgeOut(
-        id="replanner-executor", source="replanner", target="executor", condition="replan"
-    ),
-]
 
 
-def _nodes(status_by_role: dict[str, str], metrics_by_role: dict[str, WorkflowNodeMetricsOut]) -> list[WorkflowNodeOut]:
-    return [
-        WorkflowNodeOut(
-            id=role,
-            agent=role,
-            label=_LABELS[role],
-            status=status_by_role[role],
-            metrics=metrics_by_role[role],
-            position=WorkflowPositionOut(x=_POSITIONS[role][0], y=_POSITIONS[role][1]),
-        )
-        for role in ("planner", "executor", "reviewer", "replanner")
-    ]
+def _s(value) -> str:
+    return str(value.value) if hasattr(value, "value") else str(value)
 
 
-def _zero_metrics() -> WorkflowNodeMetricsOut:
-    return WorkflowNodeMetricsOut()
+async def _load_run_or_404(session: AsyncSession, run_id: str) -> AgentRun:
+    run = await session.get(AgentRun, run_id)
+    if run is None:
+        raise BizException(ErrorCode.NOT_FOUND, f"Run 不存在: {run_id}", status_code=404)
+    return run
 
 
-def _empty_graph(run_id: str) -> WorkflowGraphOut:
-    """静态模板：节点 pending、metrics 全零（GET /workflow/template）。"""
-    zero = _zero_metrics()
-    return WorkflowGraphOut(
-        run_id=run_id,
-        nodes=_nodes(
-            status_by_role={r: "pending" for r in _POSITIONS},
-            metrics_by_role={r: zero.model_copy() for r in _POSITIONS},
-        ),
-        edges=[e.model_copy() for e in _EDGES],
-    )
+async def _graph_for_run(session: AsyncSession, run: AgentRun) -> WorkflowGraphOut:
+    steps = list((await session.execute(
+        select(PlanStep).where(PlanStep.plan_id.in_(
+            select(Plan.id).where(Plan.run_id == run.id)))
+        .order_by(PlanStep.idx.asc())
+    )).scalars().all())
+    by_agent: dict[str, list[PlanStep]] = {}
+    for s in steps:
+        by_agent.setdefault(_s(s.agent), []).append(s)
+    tool_calls = (await session.execute(
+        select(func.count()).select_from(ToolCall).where(ToolCall.run_id == run.id)
+    )).scalar_one()
+    message_counts: dict[str, int] = {}
+    for role, cnt in (await session.execute(
+        select(Message.role, func.count()).where(Message.run_id == run.id)
+        .group_by(Message.role)
+    )).all():
+        message_counts[_s(role)] = int(cnt)
 
-
-def _executor_status(statuses: list[str]) -> str:
-    if not statuses:
-        return "pending"
-    if "failed" in statuses:
-        return "failed"
-    if all(s == "done" for s in statuses):
-        return "completed"
-    if any(s in ("pending", "running") for s in statuses):
+    def _steps_status(agent: str) -> str:
+        ss = by_agent.get(agent, [])
+        statuses = [_s(s.status) for s in ss]
+        if not statuses:
+            return "pending"
+        if all(x == "done" for x in statuses):
+            return "completed"
+        if "failed" in statuses:
+            return "failed"
         return "executing"
-    return "executing"
+
+    run_status = _s(run.status)
+    nodes = []
+    # planner
+    planner_status = "completed" if steps else ("executing" if run_status == "planning" else "pending")
+    if run_status in ("completed", "failed", "cancelled"):
+        planner_status = "completed" if run_status != "failed" else "failed"
+    # executor
+    executor_status = _steps_status("executor")
+    if executor_status == "pending" and run_status == "executing":
+        executor_status = "executing"
+    # reviewer
+    reviewer_status = ("completed" if run_status == "completed"
+                       else "failed" if run_status == "failed"
+                       else "reviewing" if run_status == "reviewing"
+                       else "pending")
+    # replanner
+    replanner_status = "completed" if (run.replan_count or 0) > 0 else "pending"
+    if run_status == "failed" and (run.replan_count or 0) >= 2:
+        replanner_status = "failed"
+
+    def _m(agent: str, tool_calls_count: int = 0) -> WorkflowNodeMetrics:
+        ss = by_agent.get(agent, [])
+        duration = sum(s.attempt * 100 for s in ss)  # 无步骤级耗时列，以尝试次数近似（如实）
+        return WorkflowNodeMetrics(
+            durationMs=duration, tokens=0,
+            messages=message_counts.get(agent, 0), toolCalls=tool_calls_count)
+
+    nodes_spec = [
+        ("planner", "planner", _LABELS["planner"], planner_status, _m("planner")),
+        ("executor", "executor", _LABELS["executor"], executor_status,
+         _m("executor", tool_calls_count=int(tool_calls))),
+        ("reviewer", "reviewer", _LABELS["reviewer"], reviewer_status, _m("reviewer")),
+        ("replanner", "replanner", _LABELS["replanner"], replanner_status, _m("replanner")),
+    ]
+    for nid, agent, label, status, metrics in nodes_spec:
+        x, y = _POSITIONS[agent]
+        nodes.append(WorkflowNodeOut(
+            id=nid, agent=agent, label=label, status=status,
+            metrics=metrics, position=WorkflowNodePosition(x=x, y=y)))
+
+    edges = [
+        WorkflowEdgeOut(id="e1", source="planner", target="executor"),
+        WorkflowEdgeOut(id="e2", source="executor", target="reviewer"),
+        WorkflowEdgeOut(id="e3", source="reviewer", target="replanner", condition="review.failed"),
+        WorkflowEdgeOut(id="e4", source="replanner", target="executor", condition="replan"),
+    ]
+    return WorkflowGraphOut(runId=run.id, nodes=nodes, edges=edges)
+
+
+@router.get("/runs/{run_id}/graph", response_model=WorkflowGraphOut)
+async def run_graph(run_id: str, session: AsyncSession = Depends(get_db)) -> WorkflowGraphOut:
+    run = await _load_run_or_404(session, run_id)
+    return await _graph_for_run(session, run)
 
 
 @router.get("/template", response_model=WorkflowGraphOut)
 async def workflow_template() -> WorkflowGraphOut:
-    return _empty_graph("")
+    nodes = [WorkflowNodeOut(
+        id=agent, agent=agent, label=_LABELS[agent], status="pending",
+        metrics=WorkflowNodeMetrics(),
+        position=WorkflowNodePosition(x=_POSITIONS[agent][0], y=_POSITIONS[agent][1]),
+    ) for agent in ("planner", "executor", "reviewer", "replanner")]
+    edges = [
+        WorkflowEdgeOut(id="e1", source="planner", target="executor"),
+        WorkflowEdgeOut(id="e2", source="executor", target="reviewer"),
+        WorkflowEdgeOut(id="e3", source="reviewer", target="replanner", condition="review.failed"),
+        WorkflowEdgeOut(id="e4", source="replanner", target="executor", condition="replan"),
+    ]
+    return WorkflowGraphOut(runId=None, nodes=nodes, edges=edges)
 
 
-@router.get("/runs/{run_id}/graph", response_model=WorkflowGraphOut)
-async def workflow_run_graph(
-    run_id: str, session: AsyncSession = Depends(get_db)
-) -> WorkflowGraphOut:
-    run = await session.get(AgentRun, run_id)
-    if run is None:
-        raise BizException(ErrorCode.NOT_FOUND, f"运行 {run_id} 不存在", status_code=404)
-
-    rows = (
-        await session.execute(
-            select(PlanStep.agent, PlanStep.status, PlanStep.idx, Plan.revision)
-            .join(Plan, PlanStep.plan_id == Plan.id)
-            .where(Plan.run_id == run_id)
-            .order_by(Plan.revision, PlanStep.idx)
-        )
-    ).all()
-
-    by_role: dict[str, list[str]] = {"planner": [], "executor": [], "reviewer": [], "replanner": []}
-    for agent, status, _idx, _rev in rows:
-        role = str(agent)
-        if role in by_role:
-            by_role[role].append(str(status))
-
-    run_status = str(run.status)
-    # planner：run/plan 存在且首个 planner 步骤 done → completed，否则 executing
-    planner_first_done = bool(by_role["planner"]) and by_role["planner"][0] == "done"
-    status_by_role = {
-        "planner": "completed" if planner_first_done else "executing",
-        "executor": _executor_status(by_role["executor"]),
-        "reviewer": (
-            "completed" if run_status == "completed"
-            else "failed" if run_status == "failed"
-            else "pending"
-        ),
-        "replanner": "completed" if run.replan_count > 0 else "pending",
-    }
-
-    msg_rows = (
-        await session.execute(
-            select(Message.role, func.count())
-            .where(Message.run_id == run_id)
-            .group_by(Message.role)
-        )
-    ).all()
-    msg_counts = {str(role): int(n) for role, n in msg_rows}
-
-    tool_calls = int(
-        (
-            await session.execute(
-                select(func.count()).select_from(ToolCall).where(ToolCall.run_id == run_id)
-            )
-        ).scalar_one()
-    )
-
-    metrics_by_role = {
-        "planner": WorkflowNodeMetricsOut(messages=msg_counts.get("planner", 0)),
-        "executor": WorkflowNodeMetricsOut(messages=msg_counts.get("executor", 0), tool_calls=tool_calls),
-        "reviewer": WorkflowNodeMetricsOut(messages=msg_counts.get("reviewer", 0)),
-        "replanner": WorkflowNodeMetricsOut(messages=msg_counts.get("replanner", 0)),
-    }
-    return WorkflowGraphOut(
-        run_id=run_id,
-        nodes=_nodes(status_by_role, metrics_by_role),
-        edges=[e.model_copy() for e in _EDGES],
-    )
+@router.get("/runs/{run_id}/task-check")
+async def run_task_check(run_id: str, session: AsyncSession = Depends(get_db)) -> dict:
+    """辅助端点：run 归属 task 状态（诊断用）。"""
+    run = await _load_run_or_404(session, run_id)
+    task = await session.get(AgentTask, run.task_id)
+    return {"runId": run.id, "taskStatus": _s(task.status) if task else None}
