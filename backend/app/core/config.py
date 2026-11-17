@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     RAG_TOPK: int = 5
     RAG_RRF_K: int = 60
 
+    # B7 多模态（OCR / 图片理解 / 图表问答为三个分立能力，分别验收）
+    GLM_VISION_MODEL: str = "glm-4v-plus"
+    MULTIMODAL_TIMEOUT_SECONDS: int = 60
+    MULTIMODAL_MAX_IMAGE_BYTES: int = 5_000_000
+    MULTIMODAL_ALLOWED_MIME: str = "image/png,image/jpeg,image/webp"
+
     # 向量库（P3 启用）
     CHROMA_PERSIST_DIR: str = "./data/chroma"
 
