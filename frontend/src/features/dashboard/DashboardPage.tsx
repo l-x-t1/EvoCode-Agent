@@ -82,7 +82,7 @@ export default function DashboardPage() {
         <MetricCard
           label="任务总数"
           value={String(summary.data?.tasksTotal ?? 0)}
-          delta="+12 今日"
+          delta={`+${summary.data?.tasksToday ?? 0} 今日`}
           deltaTone="up"
           sub={`成功率 ${Math.round((summary.data?.successRate ?? 0) * 100)}%`}
           loading={summary.loading}
@@ -99,8 +99,6 @@ export default function DashboardPage() {
         <MetricCard
           label="Token 消耗"
           value={formatTokens(summary.data?.tokensTotal ?? 0)}
-          delta="+8.2%"
-          deltaTone="up"
           sub={`今日 ${formatTokens(summary.data?.tokensToday ?? 0)}`}
           loading={summary.loading}
           to="/evaluation"
@@ -108,8 +106,6 @@ export default function DashboardPage() {
         <MetricCard
           label="Skill 库"
           value={String(summary.data?.skillCount ?? 0)}
-          delta="+2 本周"
-          deltaTone="up"
           sub={`累计进化 ${summary.data?.skillEvolutions ?? 0} 次`}
           loading={summary.loading}
           to="/skills"

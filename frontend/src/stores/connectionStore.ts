@@ -12,7 +12,8 @@ interface ConnectionState {
 }
 
 export const useConnectionStore = create<ConnectionState>()((set) => ({
-  apiMode: import.meta.env.VITE_API_MODE === 'live' ? 'live' : 'mock',
+  /** 与 main.tsx 的 MSW 启动条件一致：仅显式 'mock' 才是 mock，否则 live */
+  apiMode: import.meta.env.VITE_API_MODE === 'mock' ? 'mock' : 'live',
   apiHealthy: true,
   setApiHealthy: (apiHealthy) => set({ apiHealthy }),
   sseConnected: false,

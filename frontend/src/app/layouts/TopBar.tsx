@@ -1,16 +1,43 @@
 import { Bell, Plus, Search } from 'lucide-react'
+import { useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import { toast } from 'sonner'
 import { StatusDot } from '@/components/common/StatusDot'
 import { Button } from '@/components/ui/button'
+import { fetchSystemHealth } from '@/features/dashboard/api'
 import { useConnectionStore } from '@/stores/connectionStore'
 
 /**
  * 顶栏（h-14）：全局搜索（⌘K，P2 接 SearchCommand）+ 运行状态 + 通知 + 新建任务。
  * 通知中心未实现（验收 M6）：不放虚构未读数，点击给出诚实反馈。
+ * 系统状态：真实轮询 GET /system/health（每 30s，api/postgres/redis 均 ok 才算健康）。
  */
+const HEALTH_POLL_MS = 30_000
+
 export function TopBar() {
-  const { apiHealthy } = useConnectionStore()
+  const { apiHealthy, setApiHealthy } = useConnectionStore()
+
+  useEffect(() => {
+    let cancelled = false
+    const check = async () => {
+      try {
+        const health = await fetchSystemHealth()
+        const ok =
+          health.api.status === 'ok' &&
+          health.postgres.status === 'ok' &&
+          health.redis.status === 'ok'
+        if (!cancelled) setApiHealthy(ok)
+      } catch {
+        if (!cancelled) setApiHealthy(false)
+      }
+    }
+    void check()
+    const timer = setInterval(check, HEALTH_POLL_MS)
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+    }
+  }, [setApiHealthy])
 
   return (
     <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-5">

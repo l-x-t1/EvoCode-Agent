@@ -43,6 +43,39 @@ class Settings(BaseSettings):
     DB_POOL_SIZE: int = 5
     REDIS_URL: str = "redis://localhost:6379/0"
 
+    # B2 工具执行与隔离（应用层访问控制，非 OS 级沙箱；容器 Provider 见 core/sandbox.py）
+    WORKSPACE_BASE: str = "./data/workspace"
+    TOOL_TIMEOUT_SECONDS: int = 30
+    TOOL_MAX_RETRIES: int = 2
+    TOOL_MAX_STEPS: int = 20
+    TOOL_OUTPUT_LIMIT_BYTES: int = 1_000_000
+
+    # B3 LLM / Agent 编排（真实模型参与决策；GLM_API_KEY 走环境变量，绝不入代码/日志）
+    GLM_MODEL: str = "glm-5.3"
+    GLM_FLASH_MODEL: str = "glm-5.3-flash"
+    LLM_TIMEOUT_SECONDS: int = 60
+    LLM_TEMPERATURE: float = 0.2
+    LLM_MAX_TOKENS: int = 4096
+    AGENT_MAX_REPLANS: int = 2
+    AGENT_STEP_TURNS: int = 6          # 单个 step 内最多 LLM 决策轮数
+    SSE_HEARTBEAT_SECONDS: int = 15
+    SSE_POLL_SECONDS: float = 0.5
+
+    # B6 RAG（Embedding Provider 独立抽象，不与主对话模型强绑定）
+    GLM_EMBEDDING_MODEL: str = "embedding-3"
+    GLM_EMBEDDING_DIM: int = 1024
+    RAG_DATA_DIR: str = "./data/rag"
+    RAG_CHUNK_CHARS: int = 800
+    RAG_CHUNK_OVERLAP: int = 100
+    RAG_TOPK: int = 5
+    RAG_RRF_K: int = 60
+
+    # B7 多模态（OCR / 图片理解 / 图表问答为三个分立能力，分别验收）
+    GLM_VISION_MODEL: str = "glm-4v-plus"
+    MULTIMODAL_TIMEOUT_SECONDS: int = 60
+    MULTIMODAL_MAX_IMAGE_BYTES: int = 5_000_000
+    MULTIMODAL_ALLOWED_MIME: str = "image/png,image/jpeg,image/webp"
+
     # 向量库（P3 启用）
     CHROMA_PERSIST_DIR: str = "./data/chroma"
 

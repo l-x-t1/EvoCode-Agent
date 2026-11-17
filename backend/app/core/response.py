@@ -31,13 +31,15 @@ class Page(BaseModel, Generic[T]):
     size: int
 
 
-# 错误码常量（docs/06 §1）
+# 错误码常量（docs/06 §1；validation_error/not_ready 为后端补充，已回写文档）
 class ErrorCode:
     INVALID_REQUEST = "invalid_request"
     VALIDATION_ERROR = "validation_error"
     NOT_FOUND = "not_found"
     CONFLICT = "conflict"
+    APPROVAL_REQUIRED = "approval_required"
     NOT_READY = "not_ready"
     RATE_LIMITED = "rate_limited"
     MODEL_UNAVAILABLE = "model_unavailable"
+    MCP_UNAVAILABLE = "mcp_unavailable"
     INTERNAL = "internal"
