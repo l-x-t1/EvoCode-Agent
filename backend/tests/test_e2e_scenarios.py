@@ -81,6 +81,17 @@ class OrchestratorPatch:
         orch_module._orchestrator = self._original
 
 
+async def wait_run_created(app_client: AsyncClient, task_id: str, timeout: float = 10.0) -> str:
+    """run 由后台 bootstrap 异步创建：轮询任务详情直到 latestRunId 出现。"""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        detail = (await app_client.get(f"/api/v1/tasks/{task_id}")).json()
+        if detail.get("latestRunId"):
+            return detail["latestRunId"]
+        await asyncio.sleep(0.2)
+    raise TimeoutError(f"任务 {task_id} 未在 {timeout}s 内拉起 run")
+
+
 def _plan_response(steps: list[str]):
     return resp({"steps": [{"index": i + 1, "title": t} for i, t in enumerate(steps)]})
 
@@ -105,8 +116,7 @@ async def test_s1_normal_task_end_to_end(app_client: AsyncClient, deps_available
             "title": "S1 正常端到端", "description": "验证创建到完成的真实链路"})
         assert r.status_code == 201
         task_id = r.json()["id"]
-        run_id = r.json()["latestRunId"]
-        assert run_id is not None  # 编排器已在创建后拉起 run
+        run_id = await wait_run_created(app_client, task_id)
 
         run = await wait_terminal(run_id)
         assert str(getattr(run.status, "value", run.status)) == "completed"
@@ -135,7 +145,7 @@ async def test_s2_multi_turn_history_reaches_planner(app_client: AsyncClient, de
             "title": "S2 多轮对话",
             "description": "请基于下面的讨论总结结论：第一轮我们确定了用 PostgreSQL；第二轮确定了连接池大小 5。"})
         task_id = r.json()["id"]
-        run_id = r.json()["latestRunId"]
+        run_id = await wait_run_created(app_client, task_id)
         run = await wait_terminal(run_id)
         assert str(getattr(run.status, "value", run.status)) == "completed"
         # Planner 收到的 user 消息包含会话历史关键信息（多轮上下文真实进入提示词）
@@ -158,7 +168,7 @@ async def test_s3_fail_then_replan_succeeds(app_client: AsyncClient, deps_availa
         resp({"verdict": "pass", "summary": "修订后达标"}),
     ]) as orch:
         r = await app_client.post("/api/v1/tasks", json={"title": "S3 重规划", "description": ""})
-        run_id = r.json()["latestRunId"]
+        run_id = await wait_run_created(app_client, r.json()["id"])
         run = await wait_terminal(run_id)
         assert str(getattr(run.status, "value", run.status)) == "completed"
         assert run.replan_count == 1
@@ -188,7 +198,7 @@ async def test_s5_permission_denied(app_client: AsyncClient, deps_available: boo
         ]) as orch:
             r2 = await app_client.post("/api/v1/tasks",
                                        json={"title": "S5 权限拒绝", "description": ""})
-            run_id = r2.json()["latestRunId"]
+            run_id = await wait_run_created(app_client, r2.json()["id"])
             run = await wait_terminal(run_id)
             assert str(getattr(run.status, "value", run.status)) == "completed"
             events = await events_of(run_id)
@@ -211,7 +221,7 @@ async def test_s6_approval_approved_resumes(app_client: AsyncClient, deps_availa
         resp({"verdict": "pass", "summary": "报告完成"}),
     ]) as orch:
         r = await app_client.post("/api/v1/tasks", json={"title": "S6 审批通过", "description": ""})
-        run_id = r.json()["latestRunId"]
+        run_id = await wait_run_created(app_client, r.json()["id"])
         # 危险写入 → 挂起
         await wait_suspended(run_id)
         approvals = (await app_client.get("/api/v1/approvals?status=pending")).json()["items"]
@@ -246,7 +256,7 @@ async def test_s7_approval_rejected_replans(app_client: AsyncClient, deps_availa
         resp({"verdict": "pass", "summary": "完成"}),
     ]) as orch:
         r = await app_client.post("/api/v1/tasks", json={"title": "S7 审批拒绝", "description": ""})
-        run_id = r.json()["latestRunId"]
+        run_id = await wait_run_created(app_client, r.json()["id"])
         await wait_suspended(run_id)
         approvals = (await app_client.get("/api/v1/approvals?status=pending")).json()["items"]
         apv = next(a for a in approvals if a["runId"] == run_id)
