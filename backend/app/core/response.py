@@ -41,4 +41,5 @@ class ErrorCode:
     NOT_READY = "not_ready"
     RATE_LIMITED = "rate_limited"
     MODEL_UNAVAILABLE = "model_unavailable"
+    MCP_UNAVAILABLE = "mcp_unavailable"
     INTERNAL = "internal"
