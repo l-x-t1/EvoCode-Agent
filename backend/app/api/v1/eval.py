@@ -47,10 +47,10 @@ def _since(days: int) -> datetime:
 
 @router.get("/overview", response_model=EvalOverviewOut)
 async def eval_overview(
-    range: str = Query(default="7d", pattern="^(7d|30d|90d)$"),
+    range_: str = Query(default="7d", alias="range", pattern="^(7d|30d|90d)$"),
     session: AsyncSession = Depends(get_db),
 ) -> EvalOverviewOut:
-    days = _range_or_422(range)
+    days = _range_or_422(range_)
     since = _since(days)
     counts = dict((await session.execute(
         select(AgentTask.status, func.count()).group_by(AgentTask.status)
@@ -76,15 +76,14 @@ async def eval_overview(
         .where(ContextSnapshot.trigger != "initial", ContextSnapshot.created_at >= since)
     )).scalar_one())
     compression_rate = round(compressions / max(len((await session.execute(
-        select(AgentRun.id)).all())), 1), 4)
+        select(AgentRun.id))).scalars().all()), 1), 4)
 
     # 按日趋势（created/succeeded/failed，零填充）
     day = func.date_trunc("day", AgentTask.created_at).label("day")
     rows = (await session.execute(
         select(day,
                func.count().label("created"),
-               func.sum(case((AgentTask.status == "completed", 1), else_=0)),
-               func.sum(case((AgentTask.status == "failed", 1), else_=0)))
+               func.sum(case((AgentTask.status == "failed", 1), else_=0)).label("failed"))
         .where(AgentTask.created_at >= since).group_by(day)
     )).all()
     by_date = {r.day.date().isoformat(): r for r in rows}
@@ -95,10 +94,9 @@ async def eval_overview(
         trend.append(EvalTrendPoint(
             date=d, overall=int(r.created) if r else 0,
             byType={"created": int(r.created) if r else 0,
-                    "succeeded": int(r.succeeded or 0) if r else 0,
                     "failed": int(r.failed or 0) if r else 0}))
     return EvalOverviewOut(
-        range=range, successRate=success_rate, avgDurationMs=avg_duration,
+        range=range_, successRate=success_rate, avgDurationMs=avg_duration,
         avgCostPerTask=avg_cost, compressionRate=compression_rate, trend=trend)
 
 

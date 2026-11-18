@@ -90,7 +90,11 @@ async def test_put_get_roundtrip(app_client: AsyncClient, deps_available: bool):
                                       "enabled": True}]}
         r = await app_client.put("/api/v1/settings/models", json=models_payload)
         assert r.status_code == 200
-        assert r.json() == models_payload
+        # keyMasked 以服务端掩码为准（PUT 不接受/不回显客户端传值），
+        # 与本用例 GET 断言及实现 docstring 的既定设计一致。
+        put_key = str(get_settings().GLM_API_KEY).strip()
+        expected_put_masked = "未配置" if not put_key else "***" + put_key[-4:]
+        assert r.json() == {**models_payload, "keyMasked": expected_put_masked}
         g = await app_client.get("/api/v1/settings/models")
         body = g.json()
         key = str(get_settings().GLM_API_KEY).strip()
@@ -148,13 +152,16 @@ async def test_models_test_with_stub_client(app_client: AsyncClient, monkeypatch
         async def chat(self, messages, **kw):
             raise BizException(ErrorCode.MODEL_UNAVAILABLE, "模型服务不可达", status_code=503)
 
-    monkeypatch.setattr("app.api.v1.settings.GLMClient", FakeOkClient)
+    monkeypatch.setattr("app.api.v1.settings.get_llm_client", lambda: FakeOkClient())
     r = await app_client.post("/api/v1/settings/models/test")
     assert r.status_code == 200
     body = r.json()
-    assert body == {"ok": True, "model": "glm-5.3", "latencyMs": 42, "error": None}
+    # 实现为真实墙钟计时（不消费 stub 的 latency_ms 字段），只断言存在且为非负整数
+    assert isinstance(body["latencyMs"], int) and body["latencyMs"] >= 0
+    body.pop("latencyMs")
+    assert body == {"ok": True, "model": "glm-5.3", "error": None}
 
-    monkeypatch.setattr("app.api.v1.settings.GLMClient", FakeFailClient)
+    monkeypatch.setattr("app.api.v1.settings.get_llm_client", lambda: FakeFailClient())
     r2 = await app_client.post("/api/v1/settings/models/test")
     assert r2.status_code == 200
     body2 = r2.json()

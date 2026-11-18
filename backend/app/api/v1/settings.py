@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Body, Depends
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -97,7 +97,7 @@ async def get_settings_domain(domain: str, session: AsyncSession = Depends(get_d
 
 @router.put("/{domain}")
 async def put_settings_domain(
-    domain: str, body: object, session: AsyncSession = Depends(get_db)
+    domain: str, body: dict = Body(...), session: AsyncSession = Depends(get_db)
 ) -> object:
     domain = _domain_or_422(domain)
     if domain == "models" and isinstance(body, dict):

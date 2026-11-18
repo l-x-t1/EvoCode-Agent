@@ -1,29 +1,18 @@
-"""B9 端到端场景套件（≥10 场景，全部真实 HTTP + 真实 PG/Redis/工具/SSE）。
+"""B9 端到端场景套件（12 场景，全部真实 HTTP + 真实 PG/Redis/工具/SSE）。
 
 诚实声明：所有走 Agent 编排的场景使用注入式 FakeLLM（唯一非真实环节，
 已声明）；其余每一层（HTTP/DB/工具子进程/审批/SSE/快照）均为真实执行。
-GLM_API_KEY 就绪后，同一套场景换 get_llm_client() 即为真实模型验收
-（ FakeLLM → get_vision/get_llm 的切换点已收敛在 orchestrator/llm 工厂）。
+GLM_API_KEY 就绪后，同一套场景换 get_llm_client() 即为真实模型验收。
 
-场景清单（编号对应 docs/10 §B9）：
-S1  正常任务端到端（创建→计划→工具→复核→completed）
-S2  多轮对话上下文进入 Planner
-S3  失败→重规划成功
-S4  工具超时→重试（服务层编排）
-S5  权限拒绝（disabled 工具）
-S6  审批通过→恢复原执行位置→完成
-S7  审批拒绝→Replanner
-S8  SSE Last-Event-ID 断线续传
-S9  服务重启恢复 + Snapshot 重建
-S10 Skill 回滚
-S11 RAG 导入→检索→引用
-S12 压缩触发→context.updated→快照链
+场景清单：S1 正常端到端 / S2 多轮上下文 / S3 失败重规划 / S4 工具超时重试 /
+S5 权限拒绝 / S6 审批通过恢复 / S7 审批拒绝重规划 / S8 SSE 断线续传 /
+S9 重启恢复+快照重建 / S10 Skill 回滚 / S11 RAG 引用 / S12 压缩触发。
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
+import uuid
 from datetime import datetime, timezone
 
 import pytest
@@ -34,15 +23,23 @@ from sqlalchemy import select
 import app.agents.orchestrator as orch_module
 from app.agents.orchestrator import AgentOrchestrator
 from app.core.config import get_settings
-from app.core.enums import AgentRole, PlanStepStatus, RiskLevel, TaskStatus, ToolCallStatus
+from app.core.enums import AgentRole, ContextTrigger, RiskLevel, TaskStatus
+from app.db.redis import get_redis
 from app.db.session import get_session_factory
 from app.models.context import ContextSnapshot
-from app.models.execution import AgentExecutionLog, Approval
+from app.models.execution import AgentExecutionLog
 from app.models.misc import Setting
 from app.models.skill import Skill, SkillVersion
-from app.models.task import AgentRun
-from sqlalchemy import select
-from tests.test_e2e_helpers import (FakeLLM, events_of, mk_run_direct, resp, wait_suspended, wait_terminal)
+from app.models.task import AgentRun, AgentTask
+from app.rag.service import reset_rag_service
+from tests.test_e2e_helpers import (
+    FakeLLM,
+    events_of,
+    mk_run_direct,
+    resp,
+    wait_suspended,
+    wait_terminal,
+)
 
 
 @pytest_asyncio.fixture(autouse=True)
@@ -70,10 +67,9 @@ class OrchestratorPatch:
         self._original = None
 
     async def __aenter__(self) -> AgentOrchestrator:
-        from app.db.redis import get_redis
-
         self._original = orch_module._orchestrator
         orch = AgentOrchestrator(redis=get_redis(), llm=self.fake)
+        orch.fake = self.fake          # 供测试断言 LLM 调用内容
         orch_module._orchestrator = orch
         return orch
 
@@ -96,10 +92,6 @@ def _plan_response(steps: list[str]):
     return resp({"steps": [{"index": i + 1, "title": t} for i, t in enumerate(steps)]})
 
 
-def _tool(server: str, tool: str, **args):
-    return {"action": "tool", "server": server, "tool": tool, "args": args}
-
-
 # ── S1 正常任务端到端 ─────────────────────────────────
 
 async def test_s1_normal_task_end_to_end(app_client: AsyncClient, deps_available: bool):
@@ -110,6 +102,7 @@ async def test_s1_normal_task_end_to_end(app_client: AsyncClient, deps_available
         resp({"action": "tool", "server": "workspace", "tool": "read_file",
               "args": {"path": "config.md"}}),
         resp({"action": "done", "summary": "样例不存在，确认无需改动"}),
+        resp({"action": "done", "summary": "复核就绪确认完成"}),
         resp({"verdict": "pass", "summary": "确认无需改动"}),
     ]) as orch:
         r = await app_client.post("/api/v1/tasks", json={
@@ -123,7 +116,6 @@ async def test_s1_normal_task_end_to_end(app_client: AsyncClient, deps_available
         detail = (await app_client.get(f"/api/v1/tasks/{task_id}")).json()
         assert detail["status"] == "completed"
         assert detail["stats"]["toolCalls"] >= 1
-        # 真实工具执行证据：read_file 对不存在文件失败落库
         events = await events_of(run_id)
         types = [e.event_type for e in events]
         assert "run.status" in types and "plan.updated" in types
@@ -148,7 +140,6 @@ async def test_s2_multi_turn_history_reaches_planner(app_client: AsyncClient, de
         run_id = await wait_run_created(app_client, task_id)
         run = await wait_terminal(run_id)
         assert str(getattr(run.status, "value", run.status)) == "completed"
-        # Planner 收到的 user 消息包含会话历史关键信息（多轮上下文真实进入提示词）
         planner_call = orch.fake.calls[0]
         assert "PostgreSQL" in planner_call[1].content
         assert "连接池大小 5" in planner_call[1].content
@@ -173,10 +164,73 @@ async def test_s3_fail_then_replan_succeeds(app_client: AsyncClient, deps_availa
         assert str(getattr(run.status, "value", run.status)) == "completed"
         assert run.replan_count == 1
         events = await events_of(run_id)
-        # 重规划以新 revision 计划表达（8 状态契约不变）
         plans = [e for e in events if e.event_type == "plan.updated"]
         assert len(plans) >= 2
         assert plans[-1].payload["plan"]["revision"] == 2
+
+
+# ── S4 工具超时→重试（服务层编排）────────────────────
+
+async def test_s4_tool_timeout_retry(deps_available: bool):
+    if not deps_available:
+        pytest.skip("PG/Redis 未启动")
+    from app.tools.base import ToolContext, ToolSpec, ToolResult
+
+    task_id, run_id = await mk_run_direct(title="S4 超时重试", log_count=0)
+    calls = {"n": 0}
+
+    async def flaky(ctx: ToolContext, args: dict) -> ToolResult:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            await asyncio.sleep(10)  # 首次挂起 → 触发超时
+        return ToolResult(ok=True, summary=f"第 {calls['n']} 次成功")
+
+    factory = get_session_factory()
+    # 权限覆盖置 auto：upsert 现有行（可能已被 S5 清理 PUT 创建为空对象），用后恢复
+    async with factory() as session:
+        existing = (await session.execute(
+            select(Setting).where(Setting.key == "permissions")
+        )).scalar_one_or_none()
+        if existing is not None:
+            existing.value = {"workspace.flaky": "auto"}
+        else:
+            session.add(Setting(key="permissions", value={"workspace.flaky": "auto"}))
+        await session.commit()
+    try:
+        async with factory() as session:
+            from app.services.harness import HarnessService
+            from app.tools.registry import build_default_registry
+
+            registry = build_default_registry()
+            registry.register(ToolSpec(
+                server="workspace", name="flaky", description="测试用不稳定工具",
+                risk=RiskLevel.SAFE, parameters={}, handler=flaky))
+            run = await session.get(AgentRun, run_id)
+            task = await session.get(AgentTask, run.task_id)
+            settings = get_settings()
+            old_t, old_r = settings.TOOL_TIMEOUT_SECONDS, settings.TOOL_MAX_RETRIES
+            settings.TOOL_TIMEOUT_SECONDS = 1
+            settings.TOOL_MAX_RETRIES = 1
+            try:
+                outcome = await HarnessService(session, redis=None, registry=registry).execute_tool(
+                    run, task, "workspace", "flaky", {})
+                await session.commit()
+            finally:
+                settings.TOOL_TIMEOUT_SECONDS = old_t
+                settings.TOOL_MAX_RETRIES = old_r
+    finally:
+        async with factory() as session:
+            row = (await session.execute(
+                select(Setting).where(Setting.key == "permissions")
+            )).scalar_one_or_none()
+            if row is not None:
+                await session.delete(row)
+                await session.commit()
+    assert outcome.status == "succeeded"
+    assert calls["n"] == 2                             # 超时后重试成功
+    events = await events_of(run_id)
+    completed = [e for e in events if e.event_type == "tool.call.completed"]
+    assert completed and completed[0].payload["attempts"] == 2
 
 
 # ── S5 权限拒绝 ───────────────────────────────────────
@@ -184,7 +238,13 @@ async def test_s3_fail_then_replan_succeeds(app_client: AsyncClient, deps_availa
 async def test_s5_permission_denied(app_client: AsyncClient, deps_available: bool):
     if not deps_available:
         pytest.skip("PG/Redis 未启动")
-    # 禁用 read_file（真实 settings 覆盖路径，用后清理）
+    # 记录测试前的 permissions 行，用后真实恢复（不残留空行污染默认值断言）
+    factory = get_session_factory()
+    async with factory() as session:
+        prior = (await session.execute(
+            select(Setting).where(Setting.key == "permissions")
+        )).scalar_one_or_none()
+        prior_value = None if prior is None else prior.value
     r = await app_client.put("/api/v1/settings/permissions",
                              json={"workspace.read_file": "disabled"})
     assert r.status_code == 200
@@ -205,7 +265,17 @@ async def test_s5_permission_denied(app_client: AsyncClient, deps_available: boo
             failed_tools = [e for e in events if e.event_type == "tool.call.failed"]
             assert failed_tools and failed_tools[0].payload.get("reason") == "tool_disabled"
     finally:
-        await app_client.put("/api/v1/settings/permissions", json={})
+        # 恢复原状：原来无行 → 删除本测试创建的行；原来有行 → 还原旧值
+        async with factory() as session:
+            row = (await session.execute(
+                select(Setting).where(Setting.key == "permissions")
+            )).scalar_one_or_none()
+            if row is not None:
+                if prior_value is None:
+                    await session.delete(row)
+                else:
+                    row.value = prior_value
+                await session.commit()
 
 
 # ── S6 审批通过→恢复原执行位置→完成 ───────────────────
@@ -221,21 +291,19 @@ async def test_s6_approval_approved_resumes(app_client: AsyncClient, deps_availa
         resp({"verdict": "pass", "summary": "报告完成"}),
     ]) as orch:
         r = await app_client.post("/api/v1/tasks", json={"title": "S6 审批通过", "description": ""})
-        run_id = await wait_run_created(app_client, r.json()["id"])
-        # 危险写入 → 挂起
+        task_id = r.json()["id"]
+        run_id = await wait_run_created(app_client, task_id)
         await wait_suspended(run_id)
         approvals = (await app_client.get("/api/v1/approvals?status=pending")).json()["items"]
         apv = next(a for a in approvals if a["runId"] == run_id)
-        # 真实 HTTP 审批 → 编排器恢复执行流
         r2 = await app_client.post(f"/api/v1/approvals/{apv['id']}",
                                    json={"decision": "approved", "comment": "S6 批准"})
         assert r2.status_code == 200
         run = await wait_terminal(run_id)
         assert str(getattr(run.status, "value", run.status)) == "completed"
-        # 恢复原执行位置：写入真实落盘 + 文件内容来自审批后执行
         from pathlib import Path
 
-        ws = Path(get_settings().WORKSPACE_BASE) / r.json()["id"]
+        ws = Path(get_settings().WORKSPACE_BASE) / task_id
         assert (ws / "report.md").read_text("utf-8") == "S6 审批通过后写入"
         events = await events_of(run_id)
         resolved = [e for e in events if e.event_type == "approval.resolved"]
@@ -256,7 +324,8 @@ async def test_s7_approval_rejected_replans(app_client: AsyncClient, deps_availa
         resp({"verdict": "pass", "summary": "完成"}),
     ]) as orch:
         r = await app_client.post("/api/v1/tasks", json={"title": "S7 审批拒绝", "description": ""})
-        run_id = await wait_run_created(app_client, r.json()["id"])
+        task_id = r.json()["id"]
+        run_id = await wait_run_created(app_client, task_id)
         await wait_suspended(run_id)
         approvals = (await app_client.get("/api/v1/approvals?status=pending")).json()["items"]
         apv = next(a for a in approvals if a["runId"] == run_id)
@@ -268,7 +337,7 @@ async def test_s7_approval_rejected_replans(app_client: AsyncClient, deps_availa
         assert run.replan_count == 1
         from pathlib import Path
 
-        assert not (Path(get_settings().WORKSPACE_BASE) / r.json()["id"] / "danger.md").exists()
+        assert not (Path(get_settings().WORKSPACE_BASE) / task_id / "danger.md").exists()
         events = await events_of(run_id)
         assert any(e.event_type == "approval.resolved" and e.payload["status"] == "rejected"
                    for e in events)
@@ -280,6 +349,13 @@ async def test_s8_sse_last_event_id_resume(app_client: AsyncClient, deps_availab
     if not deps_available:
         pytest.skip("PG/Redis 未启动")
     task_id, run_id = await mk_run_direct(title="S8 SSE 续传", log_count=4)
+    # 场景改用终态 run：SSE 服务端在终态且无新事件时优雅关闭，避免非终态轮询永不结束
+    factory = get_session_factory()
+    async with factory() as session:
+        run = await session.get(AgentRun, run_id)
+        run.status = TaskStatus.COMPLETED
+        run.finished_at = datetime.now(timezone.utc)
+        await session.commit()
     async with app_client.stream(
         "GET", f"/api/v1/runs/{run_id}/events",
         headers={"Accept": "text/event-stream", "Last-Event-ID": "2"},
@@ -296,7 +372,7 @@ async def test_s8_sse_last_event_id_resume(app_client: AsyncClient, deps_availab
                     for line in raw.split("\n"):
                         if line.startswith("id:"):
                             ids.append(int(line[3:].strip()))
-        except (asyncio.TimeoutError, StopAsyncIteration, httpx.StreamClosed):
+        except (asyncio.TimeoutError, StopAsyncIteration):
             pass
     assert ids and ids == sorted(ids) and min(ids) > 2  # 只收到 seq>2 的续传
 
@@ -306,10 +382,27 @@ async def test_s8_sse_last_event_id_resume(app_client: AsyncClient, deps_availab
 async def test_s9_restart_recovery_and_snapshot_rebuild(deps_available: bool):
     if not deps_available:
         pytest.skip("PG/Redis 未启动")
-    # 直接构造「重启时」的 DB 状态：run executing、步骤 1 done / 步骤 2 pending
     task_id, run_id = await mk_run_direct(title="S9 重启恢复", log_count=2,
                                           with_plan=("done", "pending"))
-    # 模拟重启：全新编排器实例 + 恢复扫描（非终态 run 继续推进）
+    # 清理历史遗留的非终态 run（只置终态，不删数据），避免恢复扫描驱动无关 run
+    factory = get_session_factory()
+    async with factory() as session:
+        stale = list((await session.execute(
+            select(AgentRun).where(AgentRun.status.not_in(TaskStatus.terminal()),
+                                   AgentRun.id != run_id)
+        )).scalars().all())
+        for r in stale:
+            r.status = TaskStatus.CANCELLED
+            r.finished_at = datetime.now(timezone.utc)
+        # 本 run 造 v1 初始快照（模拟重启前已有上下文历史）
+        from app.context.manager import ContextManager
+
+        my_run = await session.get(AgentRun, run_id)
+        my_task = await session.get(AgentTask, my_run.task_id)
+        await ContextManager(session)._save_snapshot(
+            my_run, await ContextManager(session).assemble(my_run, my_task),
+            trigger=ContextTrigger.INITIAL)
+        await session.commit()
     async with OrchestratorPatch([
         resp({"action": "done", "summary": "重启后继续完成剩余步骤"}),
         resp({"verdict": "pass", "summary": "恢复后复核通过"}),
@@ -318,7 +411,6 @@ async def test_s9_restart_recovery_and_snapshot_rebuild(deps_available: bool):
         run = await wait_terminal(run_id)
         assert str(getattr(run.status, "value", run.status)) == "completed"
         assert run.replan_count == 0
-    # Snapshot 重建：恢复后的会话视图可从 DB 完整组装
     factory = get_session_factory()
     async with factory() as session:
         snaps = list((await session.execute(
@@ -334,12 +426,10 @@ async def test_s9_restart_recovery_and_snapshot_rebuild(deps_available: bool):
 async def test_s10_skill_rollback_end_to_end(app_client: AsyncClient, deps_available: bool):
     if not deps_available:
         pytest.skip("PG/Redis 未启动")
-    import uuid
-
     slug = f"b9-rollback-{uuid.uuid4().hex[:8]}"
     factory = get_session_factory()
     async with factory() as session:
-        skill = Skill(name=slug, slug=slug, description="B5 回滚场景",
+        skill = Skill(name=slug, slug=slug, description="B9 回滚场景",
                       category="testing", status="active", current_version="1.1.0")
         session.add(skill)
         await session.flush()
@@ -384,7 +474,7 @@ async def test_s11_rag_search_with_citation(app_client: AsyncClient, deps_availa
         hits = [i for i in r.json()["items"] if i["source"] == "document"]
         assert hits
         top = hits[0]
-        assert top["docId"] == "b9-deploy" and "灰度" in top["text"]
+        assert top["docId"] == "b9-deploy" and "灰度" in top["content"]
         assert top["citation"].startswith("b9-deploy.md")  # 引用来源追踪
     finally:
         settings.RAG_DATA_DIR = old_dir
@@ -400,11 +490,28 @@ async def test_s12_compression_threshold(app_client: AsyncClient, deps_available
                                           with_plan=("done",))
     factory = get_session_factory()
     async with factory() as session:
+        from app.models.conversation import Conversation, Message
+
+        conv = Conversation(task_id=task_id, user_id=(await session.get(AgentTask, task_id)).user_id,
+                            title="S12 压缩")
+        session.add(conv)
+        await session.flush()
+        for i in range(6):
+            session.add(Message(conversation_id=conv.id, run_id=None, role=AgentRole.USER,
+                                content=f"历史片段 {i}：" + "多轮上下文素材" * 40,
+                                created_at=_now()))
+        # v1 初始快照（与 orchestrator _create_run 行为一致）
+        run = await session.get(AgentRun, run_id)
+        task = await session.get(AgentTask, task_id)
+        from app.context.manager import ContextManager
+
+        await ContextManager(session)._save_snapshot(
+            run, await ContextManager(session).assemble(run, task),
+            trigger=ContextTrigger.INITIAL)
         session.add(Setting(key="system", value={"contextWindowTokens": 32000,
                                                  "compressionThreshold": 1}))
         await session.commit()
     try:
-        # 编排器阶段边界触发压缩：直接以 ContextManager 驱动（与 orchestrator 同路径）
         from app.context.manager import ContextManager
 
         async with factory() as session:
@@ -427,59 +534,3 @@ async def test_s12_compression_threshold(app_client: AsyncClient, deps_available
             if row is not None:
                 await session.delete(row)
                 await session.commit()
-
-
-# ── S4 工具超时→重试（服务层编排，真实子进程/等待）────
-
-async def test_s4_tool_timeout_retry(deps_available: bool):
-    if not deps_available:
-        pytest.skip("PG/Redis 未启动")
-    from app.tools.base import ToolContext, ToolSpec, ToolResult
-    from app.core.enums import RiskLevel
-
-    task_id, run_id = await mk_run_direct(title="S4 超时重试", log_count=0)
-    calls = {"n": 0}
-
-    class FlakyToolSpec(ToolSpec):
-        pass
-
-    async def flaky(ctx: ToolContext, args: dict) -> ToolResult:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            await asyncio.sleep(10)  # 首次挂起 → 触发超时
-        return ToolResult(ok=True, summary=f"第 {calls['n']} 次成功")
-
-    factory = get_session_factory()
-    async with factory() as session:
-        from app.services.harness import HarnessService
-        from app.tools.registry import ToolRegistry
-
-        registry = build_registry_with_flaky(flaky)
-        run = await session.get(AgentRun, run_id)
-        task = await session.get(AgentTask, run.task_id)
-        settings = get_settings()
-        old_t, old_r = settings.TOOL_TIMEOUT_SECONDS, settings.TOOL_MAX_RETRIES
-        settings.TOOL_TIMEOUT_SECONDS = 1
-        settings.TOOL_MAX_RETRIES = 1
-        try:
-            outcome = await HarnessService(session, redis=None, registry=registry).execute_tool(
-                run, task, "workspace", "flaky", {})
-            await session.commit()
-        finally:
-            settings.TOOL_TIMEOUT_SECONDS = old_t
-            settings.TOOL_MAX_RETRIES = old_r
-    assert outcome.status == "succeeded"
-    assert calls["n"] == 2                             # 超时后重试成功
-    events = await events_of(run_id)
-    completed = [e for e in events if e.event_type == "tool.call.completed"]
-    assert completed and completed[0].payload["attempts"] == 2
-
-
-def build_registry_with_flaky(handler):
-    from app.tools.registry import build_default_registry
-
-    registry = build_default_registry()
-    registry.register(ToolSpec(
-        server="workspace", name="flaky", description="测试用不稳定工具",
-        risk=RiskLevel.SAFE, parameters={}, handler=handler))
-    return registry
