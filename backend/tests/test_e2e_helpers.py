@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, timezone
 
-import pytest_asyncio
 from sqlalchemy import select
 
 from app.core.config import get_settings
@@ -44,9 +44,6 @@ def resp(obj) -> LLMResponse:
     content = obj if isinstance(obj, str) else json.dumps(obj, ensure_ascii=False)
     return LLMResponse(content=content, model="glm-5.3",
                        prompt_tokens=10, completion_tokens=5, latency_ms=1)
-
-
-import json  # noqa: E402
 
 
 async def wait_terminal(run_id: str, timeout: float = 30.0) -> AgentRun:
