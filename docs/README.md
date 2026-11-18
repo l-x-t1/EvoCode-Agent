@@ -1,6 +1,7 @@
 # EvoCode Agent — 设计文档索引
 
 > 状态：设计阶段（未开始编码）。所有文档 v0.1 草案，待确认后启动 Phase 0。
+> **⚠️ 实施状态（2026-11-17）**：项目已进入实施期，本索引的状态声明已过时。实际进度与契约修订以 docs/reports/B1–B9 验收报告与 docs/10-执行计划为准；主要契约差异：错误码新增 validation_error/not_ready/approval_required/mcp_unavailable、健康检查含 GET /api/v1/system/health 别名、Context Replanning 以快照版本链表达（不新增状态枚举）、多模态新增 /multimodal/* 四端点、RAG 新增 POST /memory/search 真实混合检索。
 
 | # | 文档 | 内容 |
 | --- | --- | --- |
