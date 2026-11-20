@@ -23,7 +23,7 @@
 | 幂等 | `POST /tasks`、`POST /eval/runs` 支持 `Idempotency-Key` 头（前端对可重复操作自动生成） |
 | CORS | 开发环境 `http://localhost:5173` 白名单 |
 
-错误码（首批）：`invalid_request`(400) / `not_found`(404) / `conflict`(409) / `approval_required`(409, 特定语义) / `rate_limited`(429) / `model_unavailable`(503) / `internal`(500)。
+错误码（首批）：`invalid_request`(400) / `not_found`(404) / `conflict`(409) / `approval_required`(409, 特定语义) / `rate_limited`(429) / `model_unavailable`(503) / `internal`(500)。B8 补充：`mcp_unavailable`(501, MCP 引擎未实现时 /settings/mcp/{serverId}/discover 如实返回)、`not_ready`(503)、`validation_error`(422)。
 
 ## 2. 核心数据模型（TypeScript 契约，`src/types/api.ts`）
 
